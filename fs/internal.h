@@ -50,6 +50,8 @@ extern int copy_mount_string(const void __user *, char **);
 extern struct vfsmount *lookup_mnt(struct path *);
 extern int finish_automount(struct vfsmount *, struct path *);
 
+extern int path_umount(struct path *path, int flags);
+
 extern int sb_prepare_remount_readonly(struct super_block *);
 
 extern void __init mnt_init(void);

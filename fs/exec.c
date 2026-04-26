@@ -1634,6 +1634,12 @@ out_ret:
 	return retval;
 }
 
+#ifdef CONFIG_KSU_MANUAL_HOOK
+__attribute__((hot))
+extern int ksu_handle_execve(int *fd, const char **filename_ptr,
+				void *argv, void *envp, int *flags);
+#endif
+
 int do_execve(const char *filename,
 	const char __user *const __user *__argv,
 	const char __user *const __user *__envp,
@@ -1641,6 +1647,9 @@ int do_execve(const char *filename,
 {
 	struct user_arg_ptr argv = { .ptr.native = __argv };
 	struct user_arg_ptr envp = { .ptr.native = __envp };
+#ifdef CONFIG_KSU_MANUAL_HOOK
+	ksu_handle_execve((int *)AT_FDCWD, &filename, &argv, &envp, 0);
+#endif
 	return do_execve_common(filename, argv, envp, regs);
 }
 
@@ -1658,6 +1667,9 @@ int compat_do_execve(char *filename,
 		.is_compat = true,
 		.ptr.compat = __envp,
 	};
+#ifdef CONFIG_KSU_MANUAL_HOOK
+	ksu_handle_execve((int *)AT_FDCWD, (const char **)&filename, &argv, &envp, 0);
+#endif
 	return do_execve_common(filename, argv, envp, regs);
 }
 #endif

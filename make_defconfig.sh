@@ -1,7 +1,7 @@
 #!/bin/bash
 
+export PATH="$HOME/arm-linux-androideabi-4.9/bin:$PATH"
 DEFCONFIG_FILE=$1
-
 if [ -z "$DEFCONFIG_FILE" ]; then
 	echo "Need defconfig file(j1v-perf_defconfig)!"
 	exit -1
@@ -14,7 +14,7 @@ fi
 
 # make .config
 env KCONFIG_NOTIMESTAMP=true \
-make ARCH=arm CROSS_COMPILE=arm-eabi- ${DEFCONFIG_FILE}
+make ARCH=arm CROSS_COMPILE=arm-linux-androideabi- ${DEFCONFIG_FILE}
 
 # run menuconfig
 env KCONFIG_NOTIMESTAMP=true \
@@ -25,3 +25,9 @@ make savedefconfig ARCH=arm
 mv defconfig arch/arm/configs/${DEFCONFIG_FILE}
 # clean kernel object
 make mrproper
+make ARCH=arm CROSS_COMPILE=arm-linux-androideabi- ${DEFCONFIG_FILE}
+make ARCH=arm CROSS_COMPILE=arm-linux-androideabi- -j$(nproc)
+
+# package ak3
+cp ./arch/arm/boot/zImage ./AnyKernel3
+cd AnyKernel3&&zip -r9 ak3.zip * -x .git README.md *placeholder
