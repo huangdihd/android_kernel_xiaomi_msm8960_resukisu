@@ -217,7 +217,16 @@ jobs:
           | Root | ReSukiSU (manual hooks) |
           | Build time (UTC) | ${BUILD_TIME} |
 
-          Flash the zip in a custom recovery (TWRP -> Install, or Apply update -> ADB sideload).
+          ## Flashing
+
+          **Flash with TWRP only** (Install -> pick the zip, or Apply update -> ADB sideload).
+
+          > ⚠️ Do NOT use ReSukiSU manager's in-app "flash AnyKernel3 / install kernel"
+          > feature. Its bundled magiskboot is a GKI 5.10+ build and cannot repack this
+          > device's legacy (header v0) boot image — it fails with
+          > "Repacking ramdisk failed". TWRP runs AnyKernel3 with the correct magiskboot
+          > shipped inside the zip.
+
           Match your manager app version to the kernel's driver version. Back up boot first.
           EOF
           gh release create "$REL_NAME" --repo "$GITHUB_REPOSITORY" \
