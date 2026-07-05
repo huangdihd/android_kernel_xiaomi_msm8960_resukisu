@@ -222,10 +222,12 @@ jobs:
           **Flash with TWRP only** (Install -> pick the zip, or Apply update -> ADB sideload).
 
           > ⚠️ Do NOT use ReSukiSU manager's in-app "flash AnyKernel3 / install kernel"
-          > feature. Its bundled magiskboot is a GKI 5.10+ build and cannot repack this
-          > device's legacy (header v0) boot image — it fails with
-          > "Repacking ramdisk failed". TWRP runs AnyKernel3 with the correct magiskboot
-          > shipped inside the zip.
+          > feature. It injects its own `mkbootfs` (picked only by kernel version: <5.10
+          > gets the `5_10` build) into the AnyKernel3 zip, which forces AnyKernel3 onto
+          > the mkbootfs ramdisk-repack path. That binary can't repack this device's
+          > legacy ramdisk, so it aborts with "Repacking ramdisk failed". TWRP runs the
+          > zip untouched — AnyKernel3 ships no mkbootfs, so it repacks via magiskboot,
+          > which works.
 
           Match your manager app version to the kernel's driver version. Back up boot first.
           EOF
