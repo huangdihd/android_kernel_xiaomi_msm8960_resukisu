@@ -224,15 +224,8 @@ jobs:
 
           ## Flashing
 
-          **Flash with TWRP only** (Install -> pick the zip, or Apply update -> ADB sideload).
-
-          > ⚠️ Do NOT use ReSukiSU manager's in-app "flash AnyKernel3 / install kernel"
-          > feature. It injects its own `mkbootfs` (picked only by kernel version: <5.10
-          > gets the `5_10` build) into the AnyKernel3 zip, which forces AnyKernel3 onto
-          > the mkbootfs ramdisk-repack path. That binary can't repack this device's
-          > legacy ramdisk, so it aborts with "Repacking ramdisk failed". TWRP runs the
-          > zip untouched — AnyKernel3 ships no mkbootfs, so it repacks via magiskboot,
-          > which works.
+          Flash the zip in TWRP (Install -> pick the zip, or Apply update -> ADB
+          sideload) or with the ReSukiSU manager's in-app kernel flasher.
 
           Match your manager app version to the kernel's driver version. Back up boot first.
           EOF
