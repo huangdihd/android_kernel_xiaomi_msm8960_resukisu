@@ -13,9 +13,9 @@ name: Build MSM8960 ReSukiSU Kernel
 on:
   workflow_dispatch:
     inputs:
-      defconfigs:
-        description: "Defconfigs to build: space-separated, or 'all'"
-        default: "aries-perf-user_defconfig"
+      devices:
+        description: "Devices to build: space-separated codenames (aries taurus), or 'all'"
+        default: "aries"
       resukisu_ref:
         description: "ReSukiSU driver ref (commit/tag/branch). Pin to match your manager app version."
         default: "e8f607a2cb1eb6f153809987eccd0d7a40ea1f70"
@@ -49,19 +49,20 @@ jobs:
       do_release: ${{ steps.set.outputs.do_release }}
     steps:
       - id: set
-        name: Compute defconfig matrix
+        name: Compute device matrix
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
             sel="all"; dorel="true"
           else
-            sel="${{ github.event.inputs.defconfigs }}"
+            sel="${{ github.event.inputs.devices }}"
             dorel="${{ github.event.inputs.make_release }}"
           fi
+          # 'all' = every real msm8960 device (not the generic base configs)
           if [ -z "$sel" ] || [ "$sel" = "all" ]; then
-            sel="aries-perf-user_defconfig taurus-perf-user_defconfig msm8960_defconfig msm8960-perf_defconfig"
+            sel="aries taurus"
           fi
           arr=$(printf '%s\n' $sel | jq -R . | jq -sc .)
-          echo "matrix={\"defconfig\":$arr}" >> "$GITHUB_OUTPUT"
+          echo "matrix={\"device\":$arr}" >> "$GITHUB_OUTPUT"
           echo "do_release=${dorel:-false}" >> "$GITHUB_OUTPUT"
           echo "Building: $sel   release: ${dorel:-false}"
 
@@ -98,9 +99,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ matrix.defconfig }}-${{ github.sha }}
+          key: ccache-${{ matrix.device }}-${{ github.sha }}
           restore-keys: |
-            ccache-${{ matrix.defconfig }}-
+            ccache-${{ matrix.device }}-
             ccache-
 
       - name: Set up arm-linux-androideabi-4.9 GCC
@@ -131,21 +132,23 @@ jobs:
             echo "kvfree patch not needed / already applied."
           fi
 
-      - name: Build ${{ matrix.defconfig }}
+      - name: Build ${{ matrix.device }}
         run: |
           export KBUILD_BUILD_USER=github-actions
           export KBUILD_BUILD_HOST=msm8960-ci
+          DEFCONFIG="${{ matrix.device }}-perf-user_defconfig"
+          test -f "arch/arm/configs/$DEFCONFIG" || { echo "::error::no defconfig for device '${{ matrix.device }}' ($DEFCONFIG)"; exit 1; }
           CC="ccache ${CROSS_COMPILE}gcc"
           ccache -M 5G >/dev/null 2>&1 || true
           ccache -z >/dev/null 2>&1 || true
 
-          make ARCH=arm CROSS_COMPILE="$CROSS_COMPILE" ${{ matrix.defconfig }}
+          make ARCH=arm CROSS_COMPILE="$CROSS_COMPILE" "$DEFCONFIG"
           # never package a stale image as success
           rm -f arch/arm/boot/zImage
           make -j"$(nproc)" ARCH=arm CROSS_COMPILE="$CROSS_COMPILE" \
             CC="$CC" HOSTCC="ccache gcc" zImage
 
-          test -f arch/arm/boot/zImage || { echo "::error::${{ matrix.defconfig }}: zImage not produced"; exit 1; }
+          test -f arch/arm/boot/zImage || { echo "::error::${{ matrix.device }}: zImage not produced"; exit 1; }
           # sanity: KSU hooks must be linked in
           grep -q " ksu_handle_execve" System.map || { echo "::error::ksu_handle_execve missing — ReSukiSU not linked"; exit 1; }
           ccache -s 2>/dev/null | grep -iE "hits|miss" || true
@@ -154,12 +157,12 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
           rm -rf AnyKernel3/.git
-          # configure AnyKernel3 for this device (aries/taurus, msm8960 boot block, non-A/B)
+          # configure AnyKernel3 for this device (msm8960 boot block, non-A/B)
           sed -i \
-            -e 's|^kernel.string=.*|kernel.string=msm8960 ReSukiSU kernel by huangdihd|' \
+            -e 's|^kernel.string=.*|kernel.string=msm8960 ReSukiSU kernel (${{ matrix.device }}) by huangdihd|' \
             -e 's|^do.devicecheck=.*|do.devicecheck=0|' \
-            -e 's|^device.name1=.*|device.name1=aries|' \
-            -e 's|^device.name2=.*|device.name2=taurus|' \
+            -e 's|^device.name1=.*|device.name1=${{ matrix.device }}|' \
+            -e 's|^device.name2=.*|device.name2=|' \
             -e 's|^device.name3=.*|device.name3=|' \
             -e 's|^device.name4=.*|device.name4=|' \
             -e 's|^device.name5=.*|device.name5=|' \
@@ -167,8 +170,7 @@ jobs:
             AnyKernel3/anykernel.sh
           cp arch/arm/boot/zImage AnyKernel3/
           cd AnyKernel3
-          DEV="$(echo '${{ matrix.defconfig }}' | sed 's/_defconfig$//')"
-          NAME="msm8960-ReSukiSU-${DEV}-$(date +%Y%m%d).zip"
+          NAME="msm8960-ReSukiSU-${{ matrix.device }}-$(date +%Y%m%d).zip"
           zip -r9 "$NAME" * -x '.git*' README.md '*.zip' >/dev/null
           echo "ZIP_NAME=$NAME" >> "$GITHUB_ENV"
           echo "ZIP_PATH=$PWD/$NAME" >> "$GITHUB_ENV"
