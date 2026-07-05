@@ -168,6 +168,11 @@ jobs:
             -e 's|^device.name5=.*|device.name5=|' \
             -e 's|^BLOCK=.*|BLOCK=/dev/block/platform/msm_sdcc.1/by-name/boot;|' \
             AnyKernel3/anykernel.sh
+          # The ReSukiSU manager's in-app flasher injects its own mkbootfs into tools/,
+          # which breaks ramdisk repack on this legacy device. Drop it right after
+          # ak3-core.sh loads so repack_ramdisk always uses magiskboot (works via both
+          # TWRP and the manager). Harmless under TWRP (no mkbootfs to remove).
+          sed -i '/^\. tools\/ak3-core\.sh;/a rm -f $BIN/mkbootfs;' AnyKernel3/anykernel.sh
           cp arch/arm/boot/zImage AnyKernel3/
           cd AnyKernel3
           NAME="msm8960-ReSukiSU-${{ matrix.device }}-$(date +%Y%m%d).zip"
