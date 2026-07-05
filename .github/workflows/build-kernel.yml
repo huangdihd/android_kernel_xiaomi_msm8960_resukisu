@@ -1,0 +1,222 @@
+name: Build MSM8960 ReSukiSU Kernel
+
+# Builds the Xiaomi msm8960 (aries / taurus) 3.4 kernel with ReSukiSU integrated,
+# packaged into an AnyKernel3 flashable zip. This is a 32-bit ARM tree built with
+# the arm-linux-androideabi-4.9 GCC toolchain (NOT clang) — output is a bare zImage,
+# no appended DTB.
+#
+# The ReSukiSU driver and AnyKernel3 are fetched at build time (they are not vendored
+# in this repo), so the repo only needs to carry the committed kernel-side integration:
+# the manual hooks (fs/*, kernel/sys.c, drivers/input/input.c, security/*), the SELinux
+# de-static exports, and the CONFIG_KSU* lines in the defconfigs.
+
+on:
+  workflow_dispatch:
+    inputs:
+      defconfigs:
+        description: "Defconfigs to build: space-separated, or 'all'"
+        default: "aries-perf-user_defconfig"
+      resukisu_ref:
+        description: "ReSukiSU driver ref (commit/tag/branch). Pin to match your manager app version."
+        default: "e8f607a2cb1eb6f153809987eccd0d7a40ea1f70"
+      make_release:
+        description: "Publish a timestamped release with the built zips"
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "resukisu-*"   # tag push builds all defconfigs and publishes to that release
+
+permissions:
+  contents: write
+
+env:
+  # 32-bit ARM GCC (same toolchain family as the local build). LineageOS prebuilt.
+  GCC_REPO: "https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git"
+  GCC_BRANCH: "lineage-18.1"
+  CROSS_COMPILE: "arm-linux-androideabi-"
+  # ccache-ECS (cctv18) — faster ccache fork for kernel builds. Static x86_64 binary.
+  CCACHE_ECS_URL: "https://github.com/cctv18/ccache-ECS/releases/download/ccache-ECS-v1.0/linux-x86_64-musl-static-binary.zip"
+  # Official ReSukiSU integration script (clones into KernelSU/, symlinks drivers/kernelsu,
+  # patches drivers/Makefile + drivers/Kconfig — all idempotent if already committed).
+  RESUKISU_SETUP: "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+      do_release: ${{ steps.set.outputs.do_release }}
+    steps:
+      - id: set
+        name: Compute defconfig matrix
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            sel="all"; dorel="true"
+          else
+            sel="${{ github.event.inputs.defconfigs }}"
+            dorel="${{ github.event.inputs.make_release }}"
+          fi
+          if [ -z "$sel" ] || [ "$sel" = "all" ]; then
+            sel="aries-perf-user_defconfig taurus-perf-user_defconfig msm8960_defconfig msm8960-perf_defconfig"
+          fi
+          arr=$(printf '%s\n' $sel | jq -R . | jq -sc .)
+          echo "matrix={\"defconfig\":$arr}" >> "$GITHUB_OUTPUT"
+          echo "do_release=${dorel:-false}" >> "$GITHUB_OUTPUT"
+          echo "Building: $sel   release: ${dorel:-false}"
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          # full history so CONFIG_LOCALVERSION_AUTO / setlocalversion get the -g<sha> suffix
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex make git zip unzip curl ca-certificates \
+            libncurses-dev python3 cpio gzip lz4 xz-utils zlib1g
+
+      - name: Set up ccache-ECS (cctv18)
+        run: |
+          mkdir -p "$HOME/ccache-ECS"
+          curl -fSL -o /tmp/ccache-ecs.zip "$CCACHE_ECS_URL"
+          unzip -oq /tmp/ccache-ecs.zip -d "$HOME/ccache-ECS"
+          chmod +x "$HOME/ccache-ECS/ccache"
+          echo "$HOME/ccache-ECS" >> "$GITHUB_PATH"
+          echo "CCACHE_DIR=$HOME/.ccache" >> "$GITHUB_ENV"
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ matrix.defconfig }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ matrix.defconfig }}-
+            ccache-
+
+      - name: Set up arm-linux-androideabi-4.9 GCC
+        run: |
+          git clone --depth=1 -b "$GCC_BRANCH" "$GCC_REPO" "$HOME/gcc49"
+          echo "$HOME/gcc49/bin" >> "$GITHUB_PATH"
+          "$HOME/gcc49/bin/${CROSS_COMPILE}gcc" --version | head -1
+
+      - name: Integrate ReSukiSU driver (${{ github.event.inputs.resukisu_ref || 'pinned' }})
+        run: |
+          REF="${{ github.event.inputs.resukisu_ref }}"
+          [ -n "$REF" ] || REF="e8f607a2cb1eb6f153809987eccd0d7a40ea1f70"
+          curl -LSs "$RESUKISU_SETUP" | bash -s "$REF"
+          test -e drivers/kernelsu/Makefile || { echo "::error::ReSukiSU driver not present after setup"; exit 1; }
+
+          # 3.4 compat: ksu_compat_kvrealloc() calls kvfree(), which does not exist
+          # before ~3.15 -> add a symmetric __kvfree() and use it. Idempotent.
+          KC="KernelSU/kernel/compat/kernel_compat.c"
+          if grep -q "kvfree(p);" "$KC" && ! grep -q "__kvfree" "$KC"; then
+            # define a __kvfree() helper right before ksu_compat_kvrealloc()
+            perl -0pi -e 's{(void \*ksu_compat_kvrealloc\(const void \*p,)}{static void __kvfree(const void *p)\n{\n#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 12, 0)\n    if (is_vmalloc_addr(p))\n        vfree(p);\n    else\n        kfree(p);\n#else\n    kvfree(p);\n#endif\n}\n\n$1}' "$KC"
+            # swap the kvfree() call in ksu_compat_kvrealloc() (disambiguated by "return newp;")
+            perl -0pi -e 's{    kvfree\(p\);\n    return newp;}{    __kvfree(p);\n    return newp;}' "$KC"
+            { grep -q "static void __kvfree" "$KC" && grep -q "__kvfree(p);" "$KC"; } \
+              || { echo "::error::failed to apply kvfree 3.4 patch"; exit 1; }
+            echo "Applied kvfree 3.4 compat patch."
+          else
+            echo "kvfree patch not needed / already applied."
+          fi
+
+      - name: Build ${{ matrix.defconfig }}
+        run: |
+          export KBUILD_BUILD_USER=github-actions
+          export KBUILD_BUILD_HOST=msm8960-ci
+          CC="ccache ${CROSS_COMPILE}gcc"
+          ccache -M 5G >/dev/null 2>&1 || true
+          ccache -z >/dev/null 2>&1 || true
+
+          make ARCH=arm CROSS_COMPILE="$CROSS_COMPILE" ${{ matrix.defconfig }}
+          # never package a stale image as success
+          rm -f arch/arm/boot/zImage
+          make -j"$(nproc)" ARCH=arm CROSS_COMPILE="$CROSS_COMPILE" \
+            CC="$CC" HOSTCC="ccache gcc" zImage
+
+          test -f arch/arm/boot/zImage || { echo "::error::${{ matrix.defconfig }}: zImage not produced"; exit 1; }
+          # sanity: KSU hooks must be linked in
+          grep -q " ksu_handle_execve" System.map || { echo "::error::ksu_handle_execve missing — ReSukiSU not linked"; exit 1; }
+          ccache -s 2>/dev/null | grep -iE "hits|miss" || true
+
+      - name: Package with AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+          rm -rf AnyKernel3/.git
+          # configure AnyKernel3 for this device (aries/taurus, msm8960 boot block, non-A/B)
+          sed -i \
+            -e 's|^kernel.string=.*|kernel.string=msm8960 ReSukiSU kernel by huangdihd|' \
+            -e 's|^do.devicecheck=.*|do.devicecheck=0|' \
+            -e 's|^device.name1=.*|device.name1=aries|' \
+            -e 's|^device.name2=.*|device.name2=taurus|' \
+            -e 's|^device.name3=.*|device.name3=|' \
+            -e 's|^device.name4=.*|device.name4=|' \
+            -e 's|^device.name5=.*|device.name5=|' \
+            -e 's|^BLOCK=.*|BLOCK=/dev/block/platform/msm_sdcc.1/by-name/boot;|' \
+            AnyKernel3/anykernel.sh
+          cp arch/arm/boot/zImage AnyKernel3/
+          cd AnyKernel3
+          DEV="$(echo '${{ matrix.defconfig }}' | sed 's/_defconfig$//')"
+          NAME="msm8960-ReSukiSU-${DEV}-$(date +%Y%m%d).zip"
+          zip -r9 "$NAME" * -x '.git*' README.md '*.zip' >/dev/null
+          echo "ZIP_NAME=$NAME" >> "$GITHUB_ENV"
+          echo "ZIP_PATH=$PWD/$NAME" >> "$GITHUB_ENV"
+          echo "Packaged: $NAME"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ env.ZIP_PATH }}
+          if-no-files-found: error
+
+  release:
+    needs: [prepare, build]
+    if: ${{ !cancelled() && needs.prepare.outputs.do_release == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all built zips
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publish timestamped release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mapfile -t zips < <(find dist -type f -name '*.zip' | sort)
+          if [ "${#zips[@]}" -eq 0 ]; then
+            echo "::error::no kernel zips were built — nothing to publish"; exit 1
+          fi
+          BUILD_TIME=$(date -u +"%Y%m%d_%H%M")
+          if [ "${{ github.event_name }}" = "push" ]; then
+            REL_NAME="${{ github.ref_name }}"
+          else
+            REL_NAME="msm8960-ReSukiSU-${BUILD_TIME}"
+          fi
+          echo "Publishing ${#zips[@]} zip(s) as new release: $REL_NAME"
+          cat > notes.md <<EOF
+          # Xiaomi msm8960 (aries / taurus) kernel with ReSukiSU
+
+          | feature | value |
+          | --- | --- |
+          | SoC | msm8960 (3.4 kernel, 32-bit ARM) |
+          | Root | ReSukiSU (manual hooks) |
+          | Build time (UTC) | ${BUILD_TIME} |
+
+          Flash the zip in a custom recovery (TWRP -> Install, or Apply update -> ADB sideload).
+          Match your manager app version to the kernel's driver version. Back up boot first.
+          EOF
+          gh release create "$REL_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "$REL_NAME" --notes-file notes.md "${zips[@]}"
